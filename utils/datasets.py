@@ -350,6 +350,22 @@ def img2label_paths(img_paths):
     return ['txt'.join(x.replace(sa, sb, 1).rsplit(x.split('.')[-1], 1)) for x in img_paths]
 
 
+def get_labels_base_dir(base_images_dir: str):
+    base_dirnames = base_images_dir.split(os.sep)
+    assert base_dirnames[-2] == 'images', f'Images must be in a some/path/images/train/some/dir/foo.jpg directory - note use of images to separate train/val/test sets'
+    base_dirnames[-2] = 'labels'
+    base_labels_dir = os.sep.join(base_dirnames)
+    return base_labels_dir
+
+
+def image_to_label_paths(base_images_dir: str, image_paths: [str]):
+    # ./dataset1/images/some/sub/dir/foo.jpg  -->  ./dataset1/labels/some/sub/dir/foo.jpg
+    # when base_dir == './dataset1'
+    base_labels_dir = get_labels_base_dir(base_images_dir)
+    label_paths = [os.path.splitext(os.path.join(base_labels_dir, os.path.relpath(p, base_images_dir)))[0] + '.txt' for p in image_paths]
+    return label_paths
+
+
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
@@ -361,33 +377,56 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
-        self.path = path        
+        path = path if isinstance(path, list) else [path]
         #self.albumentations = Albumentations() if augment else None
 
         try:
-            f = []  # image files
-            for p in path if isinstance(path, list) else [path]:
+            self.img_files = []
+            self.label_files = []
+            # JIMM BEGIN
+            for p in path:
                 p = Path(p)  # os-agnostic
                 if p.is_dir():  # dir
-                    f += glob.glob(str(p / '**' / '*.*'), recursive=True)
+                    image_paths = glob.glob(str(p / '**' / '*.*'), recursive=True)
                     # f = list(p.rglob('**/*.*'))  # pathlib
                 elif p.is_file():  # file
                     with open(p, 'r') as t:
                         t = t.read().strip().splitlines()
                         parent = str(p.parent) + os.sep
-                        f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
-                        # f += [p.parent / x.lstrip(os.sep) for x in t]  # local to global path (pathlib)
+                        image_paths = [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
                 else:
                     raise Exception(f'{prefix}{p} does not exist')
-            self.img_files = sorted([x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in img_formats])
-            # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in img_formats])  # pathlib
+                image_paths = [x.replace('/', os.sep) for x in image_paths if x.split('.')[-1].lower() in img_formats and os.path.isfile(x)]
+                self.img_files += image_paths
+                self.label_files += image_to_label_paths(str(p), image_paths)
+            # f = []  # image files
+            # for p in path if isinstance(path, list) else [path]:
+            #     p = Path(p)  # os-agnostic
+            #     if p.is_dir():  # dir
+            #         f += glob.glob(str(p / '**' / '*.*'), recursive=True)
+            #         # f = list(p.rglob('**/*.*'))  # pathlib
+            #     elif p.is_file():  # file
+            #         with open(p, 'r') as t:
+            #             t = t.read().strip().splitlines()
+            #             parent = str(p.parent) + os.sep
+            #             f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
+            #             # f += [p.parent / x.lstrip(os.sep) for x in t]  # local to global path (pathlib)
+            #     else:
+            #         raise Exception(f'{prefix}{p} does not exist')
+            # self.img_files = sorted([x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in img_formats])
+            # # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in img_formats])  # pathlib
+            # JIMM END
             assert self.img_files, f'{prefix}No images found'
+            assert len(self.img_files) == len(self.label_files), f'Mismatch in number of images, labels: {len(self.img_files)} vs {len(self.label_files)}'
         except Exception as e:
             raise Exception(f'{prefix}Error loading data from {path}: {e}\nSee {help_url}')
 
         # Check cache
-        self.label_files = img2label_paths(self.img_files)  # labels
-        cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')  # cached labels
+        # JIMM BEGIN
+        # self.label_files = img2label_paths(self.img_files)  # labels
+        # cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')  # cached labels
+        cache_path = Path(os.path.join(get_labels_base_dir(path[0]), '.cache'))
+        # JIMM END
         if cache_path.is_file():
             cache, exists = torch.load(cache_path), True  # load
             #if cache['hash'] != get_hash(self.label_files + self.img_files) or 'version' not in cache:  # changed
@@ -1263,7 +1302,7 @@ def extract_boxes(path='../coco/'):  # from utils.datasets import *; extract_box
     files = list(path.rglob('*.*'))
     n = len(files)  # number of files
     for im_file in tqdm(files, total=n):
-        if im_file.suffix[1:] in img_formats:
+        if im_file.suffix[1:].lower() in img_formats:
             # image
             im = cv2.imread(str(im_file))[..., ::-1]  # BGR to RGB
             h, w = im.shape[:2]
